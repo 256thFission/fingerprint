@@ -1,0 +1,30 @@
+name: processing-env
+channels:
+  - conda-forge
+  - defaults
+  # The 'pytorch' channel is no longer needed as we're installing via pip
+dependencies:
+  # --- Conda Packages ---
+  - python=3.11
+  - jupyter
+  - pandas
+  - numpy
+  - matplotlib
+  - scipy
+  - python-dateutil
+  - scikit-learn
+  - sentence-transformers
+  - pip  # Ensure pip is installed in the env
+
+  # --- Pip Packages ---
+  - pip:
+    # First, specify the custom index URL
+    - --index-url https://download.pytorch.org/whl/cu126
+    
+    # Now, list the packages to install from that index
+    - torch
+    - torchvision
+    
+    # 'datasets' is moved here to ensure it uses the pip-installed
+    # version of torch, not a conflicting conda version.
+    - datasets
