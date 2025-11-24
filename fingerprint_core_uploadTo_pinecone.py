@@ -17,12 +17,12 @@ from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 from pathlib import Path
 import pickle
-import os
 import logging
 import re
+import os
 from collections import Counter
 import torch.nn.functional as F
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -260,7 +260,7 @@ class FingerprintingSystem:
             df.to_parquet(cache_path, index=False)
         
         return df
-
+    
     def load_data_safe(self, max_records: int = 500000) -> pd.DataFrame:
         """Load data safely, using chunks for large JSON files to avoid OOM"""
         if self.config.data_path.endswith('.json'):
@@ -469,36 +469,40 @@ class FingerprintingSystem:
         
         return system
     
-    # def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints"):
-    #     """Upload trained fingerprints to Pinecone for querying."""
-    #     if self.train_fingerprints is None or self.train_labels is None:
-    #         raise ValueError("No trained fingerprints to upload. Train the model first.")
+    def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints"):
+        """Upload trained fingerprints to Pinecone for querying."""
+        if self.train_fingerprints is None or self.train_labels is None:
+            raise ValueError("No trained fingerprints to upload. Train the model first.")
         
-    #     pc = Pinecone(api_key=api_key)
+        pc = Pinecone(api_key=api_key)
         
-    #     # Create index if it doesn't exist (adjust dimensions based on fingerprint size)
-    #     if index_name not in pc.list_indexes().names():
-    #         pc.create_index(
-    #             name=index_name,
-    #             dimension=self.train_fingerprints.shape[1],
-    #             metric="cosine"  # Matches cosine similarity in evaluation
-    #         )
+        # Create index if it doesn't exist (adjust dimensions based on fingerprint size)
+        if index_name not in pc.list_indexes().names():
+            pc.create_index(
+                name=index_name,
+                dimension=self.train_fingerprints.shape[1],
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud="aws",
+                    region="us-east-1"
+                )
+            )
         
-    #     index = pc.Index(index_name)
+        index = pc.Index(index_name)
         
-    #     # Prepare vectors for upsert: unique ID, vector, metadata
-    #     vectors = []
-    #     for i, (fp, label) in enumerate(zip(self.train_fingerprints, self.train_labels)):
-    #         vectors.append({
-    #             "id": f"{label}_{i}",  # Unique ID: user_id + index
-    #             "values": fp.tolist(),
-    #             "metadata": {"user_id": str(label)}
-    #         })
+        # Prepare vectors for upsert: unique ID, vector, metadata
+        vectors = []
+        for i, (fp, label) in enumerate(zip(self.train_fingerprints, self.train_labels)):
+            vectors.append({
+                "id": f"{label}_{i}",  # Unique ID: user_id + index
+                "values": fp.tolist(),
+                "metadata": {"user_id": str(label)}
+            })
         
-    #     # Upsert in batches (Pinecone recommends batching for large uploads)
-    #     batch_size = 100
-    #     for j in range(0, len(vectors), batch_size):
-    #         batch = vectors[j:j + batch_size]
-    #         index.upsert(vectors=batch)
+        # Upsert in batches (Pinecone recommends batching for large uploads)
+        batch_size = 100
+        for j in range(0, len(vectors), batch_size):
+            batch = vectors[j:j + batch_size]
+            index.upsert(vectors=batch)
         
-    #     logger.info(f"Uploaded {len(vectors)} fingerprints to Pinecone index '{index_name}'")
+        logger.info(f"Uploaded {len(vectors)} fingerprints to Pinecone index '{index_name}'")
