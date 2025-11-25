@@ -35,7 +35,7 @@ def query_user_fingerprint(messages_df: pd.DataFrame,
     Args:
         messages_df: DataFrame of user's messages with content and timestamp
         extractor: Initialized FingerprintExtractor instance
-        top_k: Number of top matches to return
+        top_k: Number of top unique user matches to return
         api_key: Pinecone API key (overrides env var)
         index_name: Pinecone index name (overrides default)
         
@@ -59,21 +59,37 @@ def query_user_fingerprint(messages_df: pd.DataFrame,
     pc = Pinecone(api_key=key)
     idx = pc.Index(index)
     
+    # Query for more results to ensure we find enough unique users
+    # We ask for 10x the requested top_k to filter through duplicates
+    fetch_k = top_k * 10
+    
     response = idx.query(
         vector=user_vec.astype(float).tolist(),
-        top_k=top_k,
+        top_k=fetch_k,
         include_metadata=True,
     )
     
-    # Format results
-    matches = response["matches"] if isinstance(response, dict) else response.matches
-    return [
-        {
-            "user_id": m["metadata"].get("user_id") if isinstance(m, dict) else m.metadata.get("user_id"),
-            "score": m["score"] if isinstance(m, dict) else m.score
-        }
-        for m in matches
-    ]
+    # Format results and filter for unique users
+    raw_matches = response["matches"] if isinstance(response, dict) else response.matches
+    
+    unique_matches = []
+    seen_users = set()
+    
+    for m in raw_matches:
+        user_id = m["metadata"].get("user_id") if isinstance(m, dict) else m.metadata.get("user_id")
+        score = m["score"] if isinstance(m, dict) else m.score
+        
+        if user_id not in seen_users:
+            unique_matches.append({
+                "user_id": user_id,
+                "score": score
+            })
+            seen_users.add(user_id)
+            
+        if len(unique_matches) >= top_k:
+            break
+            
+    return unique_matches
 
 
 def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
