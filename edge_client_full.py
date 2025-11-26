@@ -22,7 +22,7 @@ from fingerprint_core_uploadTo_pinecone import FingerprintConfig, FingerprintExt
 
 # Configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-INDEX_NAME = "discord-fingerprints"
+INDEX_NAME = "'discord-fingerprints-full"
 
 
 def query_user_fingerprint(messages_df: pd.DataFrame, 
@@ -158,7 +158,7 @@ def main() -> None:
         return
     
     # Configuration for batch processing
-    INPUT_FILE = "test.json"
+    INPUT_FILE = "583446050929639444.json"
     # Example user IDs from the provided test.json
     TARGET_USERS = [
         "ecfeadbb695e",  # Anthony Reilly

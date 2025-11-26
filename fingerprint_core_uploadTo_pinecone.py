@@ -469,7 +469,7 @@ class FingerprintingSystem:
         
         return system
     
-    def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints"):
+    def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints-full"):
         """Upload trained fingerprints to Pinecone for querying."""
         if self.train_fingerprints is None or self.train_labels is None:
             raise ValueError("No trained fingerprints to upload. Train the model first.")
