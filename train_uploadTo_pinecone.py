@@ -14,7 +14,16 @@ import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import cosine_similarity
 
 # Configure logging
-log_filename = f"training_{int(time.time())}.log"
+log_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_filename = os.path.join(log_dir, f"training_{int(time.time())}.log")
+
+# Clear existing handlers (from imports) to ensure our config applies
+root_logger = logging.getLogger()
+if root_logger.handlers:
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -28,20 +37,20 @@ logger = logging.getLogger(__name__)
 def get_config():
     """Default training configuration"""
     return FingerprintConfig(
-        data_path="583446050929639444.json",
-        cache_path="cached_full_server.parquet", 
-        model_path="models/modelFull.pkl",
+        data_path="test.json",
+        cache_path="cached_test_server.parquet", 
+        model_path="models/modelTest.pkl",
         max_users=None,
         
         # Adjusted for Full Server:
         # 1. Filter noise
-        min_messages=100, 
+        min_messages=2, 
         
         # 2. Stability
-        messages_per_fingerprint=50,
+        messages_per_fingerprint=5,
         
         # 3. Overlap
-        window_step_size=25,
+        window_step_size=2,
         
         # 4. Storage/Diversity
         max_fingerprints_per_user=40,
