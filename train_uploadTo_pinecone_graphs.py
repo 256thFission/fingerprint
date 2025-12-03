@@ -39,20 +39,20 @@ logger = logging.getLogger(__name__)
 def get_config():
     """Default training configuration"""
     return FingerprintConfig(
-        data_path="test.json",
+        data_path="583446050929639444.json",
         cache_path="cached_test_server.parquet", 
         model_path="models/modelTest.pkl",
         max_users=None,
         
         # Adjusted for Full Server:
         # 1. Filter noise
-        min_messages=2, 
+        min_messages=100, 
         
         # 2. Stability
-        messages_per_fingerprint=5,
+        messages_per_fingerprint=50,
         
         # 3. Overlap
-        window_step_size=2,
+        window_step_size=25,
         
         # 4. Storage/Diversity
         max_fingerprints_per_user=40,
@@ -267,7 +267,7 @@ def train():
     
     logger.info("Loading data...")
     # Set max_records to None to load the entire file in chunks
-    df = system.load_data_safe(max_records=None)
+    df = system.load_data_safe(max_records=500000)
     df = preprocess_data(df)
     
     logger.info(f"Loaded {len(df)} messages from {df['ids'].nunique()} users")

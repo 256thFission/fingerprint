@@ -25,23 +25,72 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = "discord-fingerprints-test"
 
 
-def query_user_fingerprint(messages_df: pd.DataFrame, 
-                          extractor: FingerprintExtractor,
+def get_user_centroid_from_pinecone(user_id: str, 
+                                   api_key: str, 
+                                   index_name: str) -> Optional[np.ndarray]:
+    """Fetch all fingerprints for a user from Pinecone and calculate centroid."""
+    print(f"Fetching fingerprints for user {user_id} from Pinecone...")
+    pc = Pinecone(api_key=api_key)
+    idx = pc.Index(index_name)
+    
+    # 1. List all IDs for this user
+    # IDs are stored as f"{user_id}_{global_index}"
+    # We use prefix search. Note: user_id should be exact, so we append "_" to ensure we don't match user_id_other
+    prefix = f"{user_id}_"
+    
+    user_vector_ids = []
+    try:
+        # list returns a generator of IDs (Serverless indexes only)
+        for ids in idx.list(prefix=prefix):
+            user_vector_ids.extend(ids)
+    except Exception as e:
+        print(f"Error listing IDs for user {user_id}: {e}")
+        return None
+        
+    if not user_vector_ids:
+        print(f"No fingerprints found in Pinecone for user {user_id}")
+        return None
+    
+    print(f"Found {len(user_vector_ids)} fingerprints. Downloading...")
+        
+    # 2. Fetch vectors in batches
+    vectors = []
+    batch_size = 100
+    for i in range(0, len(user_vector_ids), batch_size):
+        batch_ids = user_vector_ids[i:i+batch_size]
+        fetch_response = idx.fetch(ids=batch_ids)
+        
+        for v_id in batch_ids:
+            if v_id in fetch_response.vectors:
+                vectors.append(fetch_response.vectors[v_id].values)
+                
+    if not vectors:
+        return None
+        
+    # 3. Calculate centroid
+    centroid = np.mean(vectors, axis=0)
+    return centroid
+
+
+def query_user_fingerprint(messages_df: Optional[pd.DataFrame] = None, 
+                          extractor: Optional[FingerprintExtractor] = None,
                           top_k: int = 5,
                           api_key: Optional[str] = None,
                           index_name: Optional[str] = None,
                           current_user_id: Optional[str] = None,
-                          threshold: float = 0.0) -> List[Dict[str, Any]]:
+                          threshold: float = 0.0,
+                          user_vector: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
     """Query user fingerprint against database.
     
     Args:
-        messages_df: DataFrame of user's messages with content and timestamp
-        extractor: Initialized FingerprintExtractor instance
+        messages_df: DataFrame of user's messages (optional if user_vector provided)
+        extractor: Initialized FingerprintExtractor instance (optional if user_vector provided)
         top_k: Number of top unique user matches to return
         api_key: Pinecone API key (overrides env var)
         index_name: Pinecone index name (overrides default)
         current_user_id: ID of the user being queried (to exclude from results)
         threshold: Minimum similarity score to include in results
+        user_vector: Pre-calculated vector to use for query (overrides messages_df)
         
     Returns:
         List of matches with user_id and score
@@ -53,8 +102,13 @@ def query_user_fingerprint(messages_df: pd.DataFrame,
     if not key:
         raise RuntimeError("PINECONE_API_KEY not set")
     
-    # Create fingerprint using the core extractor
-    user_vec = extractor.create_fingerprint(messages_df)
+    # Determine query vector
+    if user_vector is not None:
+        user_vec = user_vector
+    elif messages_df is not None and extractor is not None:
+        user_vec = extractor.create_fingerprint(messages_df)
+    else:
+        raise ValueError("Must provide either user_vector or (messages_df and extractor)")
     
     if user_vec is None:
         raise ValueError("Insufficient messages to generate fingerprint")
@@ -84,8 +138,15 @@ def query_user_fingerprint(messages_df: pd.DataFrame,
         score = m["score"] if isinstance(m, dict) else m.score
         
         # Filter out self-matches
+        # Note: When testing centroid, we usually WANT to see if the user matches themselves,
+        # so we might want to disable this check or make it optional.
+        # For now, we keep it but print a note if we find ourselves.
         if current_user_id and str(user_id) == str(current_user_id):
-            continue
+            # We found ourselves! This is good for accuracy testing.
+            # If we want to see ourselves in the list, we should NOT continue here.
+            # But the original code filtered it out to find "other" similar users.
+            # Let's include ourselves for this specific test case.
+            pass 
             
         # Filter by threshold
         if score < threshold:
@@ -170,48 +231,46 @@ def main() -> None:
         return
     
     # Configuration for batch processing
-    INPUT_FILE = "test.json"
+    # INPUT_FILE = "test.json" # Not used in centroid mode
+    
     # Example user IDs from the provided test.json
     TARGET_USERS = [
         "2f85e196681d",  # Anthony Reilly
         "ecfeadbb695e"   # Jayson Bond
     ]
     
-    # Initialize Extractor with CPU config and low message threshold for testing
-    # We set messages_per_fingerprint to 2 so that even users with few messages 
-    # (like 4, 9, 15) can generate a fingerprint.
-    config = FingerprintConfig(
-        device="cpu",
-        messages_per_fingerprint=2, 
-        aggregation_method='percentile'
-    )
-    extractor = FingerprintExtractor(config)
-    
     try:
-        # Load messages for the target users
-        user_messages_map = load_user_messages(INPUT_FILE, TARGET_USERS)
-        
-        if not user_messages_map:
-            print("No messages found for the specified users.")
-            return
-
-        # Process each user
-        for user_id, messages_df in user_messages_map.items():
-            print(f"\nProcessing User {user_id} ({len(messages_df)} messages)...")
+        # Process each user using Pinecone Centroid
+        for user_id in TARGET_USERS:
+            print(f"\nProcessing User {user_id} (Centroid Mode)...")
             
             try:
-                # Query for matches
+                # 1. Get Centroid from Pinecone
+                centroid = get_user_centroid_from_pinecone(
+                    user_id, 
+                    PINECONE_API_KEY, 
+                    INDEX_NAME
+                )
+                
+                if centroid is None:
+                    print(f"  Skipping user {user_id}: No fingerprints found in DB.")
+                    continue
+
+                # 2. Query for matches using the centroid
                 matches = query_user_fingerprint(
-                    messages_df, 
-                    extractor, 
+                    messages_df=None, 
+                    extractor=None, 
                     top_k=5,
-                    current_user_id=user_id,
-                    threshold=0.1
+                    current_user_id=None, # Pass None so we can see if the user matches themselves
+                    threshold=0.1,
+                    user_vector=centroid
                 )
                 
                 print(f"Found {len(matches)} matches for User {user_id}:")
                 for i, match in enumerate(matches, 1):
-                    print(f"  {i}. User {match['user_id']}: {match['score']:.3f}")
+                    is_self = " (SELF)" if str(match['user_id']) == str(user_id) else ""
+                    print(f"  {i}. User {match['user_id']}: {match['score']:.3f}{is_self}")
+                    
             except ValueError as ve:
                 print(f"  Skipping user {user_id}: {ve}")
             except Exception as e:
