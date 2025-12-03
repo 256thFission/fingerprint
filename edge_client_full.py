@@ -22,14 +22,16 @@ from fingerprint_core_uploadTo_pinecone import FingerprintConfig, FingerprintExt
 
 # Configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-INDEX_NAME = "'discord-fingerprints-full"
+INDEX_NAME = "discord-fingerprints-test"
 
 
 def query_user_fingerprint(messages_df: pd.DataFrame, 
                           extractor: FingerprintExtractor,
                           top_k: int = 5,
                           api_key: Optional[str] = None,
-                          index_name: Optional[str] = None) -> List[Dict[str, Any]]:
+                          index_name: Optional[str] = None,
+                          current_user_id: Optional[str] = None,
+                          threshold: float = 0.0) -> List[Dict[str, Any]]:
     """Query user fingerprint against database.
     
     Args:
@@ -38,6 +40,8 @@ def query_user_fingerprint(messages_df: pd.DataFrame,
         top_k: Number of top unique user matches to return
         api_key: Pinecone API key (overrides env var)
         index_name: Pinecone index name (overrides default)
+        current_user_id: ID of the user being queried (to exclude from results)
+        threshold: Minimum similarity score to include in results
         
     Returns:
         List of matches with user_id and score
@@ -78,6 +82,14 @@ def query_user_fingerprint(messages_df: pd.DataFrame,
     for m in raw_matches:
         user_id = m["metadata"].get("user_id") if isinstance(m, dict) else m.metadata.get("user_id")
         score = m["score"] if isinstance(m, dict) else m.score
+        
+        # Filter out self-matches
+        if current_user_id and str(user_id) == str(current_user_id):
+            continue
+            
+        # Filter by threshold
+        if score < threshold:
+            continue
         
         if user_id not in seen_users:
             unique_matches.append({
@@ -158,12 +170,11 @@ def main() -> None:
         return
     
     # Configuration for batch processing
-    INPUT_FILE = "583446050929639444.json"
+    INPUT_FILE = "test.json"
     # Example user IDs from the provided test.json
     TARGET_USERS = [
-        "ecfeadbb695e",  # Anthony Reilly
-        "2f85e196681d",  # Gilberto Lane
-        "9f08399e39f3"   # Jayson Bond
+        "2f85e196681d",  # Anthony Reilly
+        "ecfeadbb695e"   # Jayson Bond
     ]
     
     # Initialize Extractor with CPU config and low message threshold for testing
@@ -190,7 +201,13 @@ def main() -> None:
             
             try:
                 # Query for matches
-                matches = query_user_fingerprint(messages_df, extractor, top_k=5)
+                matches = query_user_fingerprint(
+                    messages_df, 
+                    extractor, 
+                    top_k=5,
+                    current_user_id=user_id,
+                    threshold=0.1
+                )
                 
                 print(f"Found {len(matches)} matches for User {user_id}:")
                 for i, match in enumerate(matches, 1):
