@@ -108,3 +108,44 @@ To automate this process, set up a cron job or a scheduled task on your server t
 1.  Gather the new messages from the last 12 hours into a JSON file.
 2.  Fetch the current list of banned users.
 3.  Make the `curl` request shown above to the running FastAPI service.
+
+## Docker Deployment
+
+You can containerize the application for easy deployment on AWS (ECS, EC2) or any other container platform.
+
+### 1. Build and Run with Docker Compose
+
+The easiest way to run the service is using Docker Compose.
+
+1.  Ensure your `.env` file is created with your `PINECONE_API_KEY`.
+2.  Run the service:
+
+```bash
+docker-compose up --build -d
+```
+
+The API will be available at `http://localhost:8000`.
+
+### 2. Build Manually
+
+```bash
+docker build -t discord-fingerprint-api .
+```
+
+### 3. Run Manually
+
+```bash
+docker run -d \
+  -p 8000:8000 \
+  --env-file .env \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/logs:/app/logs \
+  --name fingerprint-api \
+  discord-fingerprint-api
+```
+
+### AWS Deployment Notes
+
+*   **ECS/Fargate**: Push the image to ECR. Create a Task Definition that uses this image. Pass the `PINECONE_API_KEY` as an environment variable in the task definition (preferably using AWS Secrets Manager or Parameter Store).
+*   **EC2**: SSH into the instance, clone the repo, create the `.env` file, and run `docker-compose up -d`.
+

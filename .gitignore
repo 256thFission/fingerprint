@@ -1,1 +1,4 @@
 .env
+models/*.pkl
+__pycache__/
+583446050929639444.json
