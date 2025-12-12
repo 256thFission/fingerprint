@@ -10,29 +10,36 @@ import sys
 import os
 import time
 import logging
+import argparse
 import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import cosine_similarity
+from dotenv import load_dotenv
 
-# Configure logging
-log_dir = os.path.join(os.path.dirname(__file__), "logs")
-os.makedirs(log_dir, exist_ok=True)
-log_filename = os.path.join(log_dir, f"training_{int(time.time())}.log")
+# Load environment variables
+load_dotenv()
 
-# Clear existing handlers (from imports) to ensure our config applies
-root_logger = logging.getLogger()
-if root_logger.handlers:
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_filename),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
 logger = logging.getLogger(__name__)
+
+def setup_logging():
+    # Configure logging
+    log_dir = os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = os.path.join(log_dir, f"training_{int(time.time())}.log")
+
+    # Clear existing handlers (from imports) to ensure our config applies
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
 def get_config():
     """Default training configuration"""
@@ -141,13 +148,16 @@ def plot_results(df, train_y, val_y, test_y, system, val_X, output_dir="plots"):
         logger.error(f"Failed to plot threshold curve: {e}")
 
 
-def train():
+def train(data_path=None):
     """Train model"""
     start_time = time.time()
     config = get_config()
+    if data_path:
+        config.data_path = data_path
+        
     system = FingerprintingSystem(config)
     
-    logger.info("Loading data...")
+    logger.info(f"Loading data from {config.data_path}...")
     # Set max_records to None to load the entire file in chunks
     df = system.load_data_safe(max_records=None)
     df = preprocess_data(df)
@@ -193,15 +203,98 @@ def train():
     return system, metrics
 
 
+def run_incremental(data_path):
+    """Run incremental update with new data"""
+    start_time = time.time()
+    config = get_config()
+    
+    if not os.path.exists(config.model_path):
+        logger.error(f"Model not found at {config.model_path}. Cannot run incremental update.")
+        return
+
+    logger.info(f"Loading existing model from {config.model_path}...")
+    system = FingerprintingSystem.load(config.model_path)
+    
+    # Update config for this run
+    system.config.data_path = data_path
+    # Set ratios to process all data
+    system.config.train_ratio = 1.0
+    system.config.val_ratio = 0.0
+    system.config.test_ratio = 0.0
+    
+    logger.info(f"Loading new data from {data_path}...")
+    df = system.load_data_safe(max_records=None)
+    df = preprocess_data(df)
+    
+    if df.empty:
+        logger.warning("No data found in file.")
+        return
+
+    logger.info(f"Loaded {len(df)} messages from {df['ids'].nunique()} users")
+    
+    logger.info("Creating fingerprints...")
+    try:
+        # prepare_dataset returns: train_X, train_y, train_t, val_X, val_y, val_t, test_X, test_y, test_t
+        # With train_ratio=1.0, everything is in train_*
+        train_X, train_y, train_t, _, _, _, _, _, _ = system.prepare_dataset(df)
+    except ValueError as e:
+        logger.error(f"Error preparing dataset: {e}")
+        return
+
+    if len(train_X) == 0:
+        logger.warning("No fingerprints generated.")
+        return
+
+    logger.info(f"Generated {len(train_X)} fingerprints.")
+
+    # Scale fingerprints using the LOADED scaler (do not refit)
+    logger.info("Scaling fingerprints...")
+    scaled_X = system.scaler.transform(train_X)
+    
+    # Update system state for upload
+    system.train_fingerprints = scaled_X
+    system.train_labels = train_y
+    system.train_timestamps = train_t
+    
+    # Upload
+    api_key = os.getenv("PINECONE_API_KEY")
+    if api_key:
+        logger.info("Uploading fingerprints to Pinecone...")
+        system.upload_to_pinecone(api_key)
+        logger.info("Upload complete.")
+    else:
+        logger.warning("PINECONE_API_KEY not set. Skipping Pinecone upload.")
+
+    end_time = time.time()
+    logger.info(f"Total execution time: {end_time - start_time:.2f} seconds")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == 'siamese':
+    setup_logging()
+    parser = argparse.ArgumentParser(description="Train or update fingerprinting model")
+    parser.add_argument("data_path", nargs='?', help="Path to data file")
+    parser.add_argument("--incremental", action="store_true", help="Run in incremental mode (load model, process new data, upload)")
+    parser.add_argument("--siamese", action="store_true", help="Use Siamese network")
+    
+    args = parser.parse_args()
+
+    if args.incremental:
+        if not args.data_path:
+            logger.error("Data path is required for incremental mode.")
+        else:
+            run_incremental(args.data_path)
+            
+    elif args.siamese:
         start_time = time.time()
         config = get_config()
+        if args.data_path:
+            config.data_path = args.data_path
+            
         config.use_siamese = True
         config.model_path = "models/siamese_model.pkl"
         system = FingerprintingSystem(config)
         
-        logger.info("Loading data...")
+        logger.info(f"Loading data from {config.data_path}...")
         df = system.load_data_safe(max_records=None)
         df = preprocess_data(df)
         
@@ -239,4 +332,4 @@ if __name__ == "__main__":
         elapsed_time = end_time - start_time
         logger.info(f"Total execution time: {elapsed_time:.2f} seconds")
     else:
-        train()
+        train(args.data_path)
