@@ -53,32 +53,40 @@ The service will be available at `http://localhost:8000`. You can access the int
 
 ## API Usage
 
-### Endpoint: `POST /process`
+### 1. Upload Data (Incremental Training)
 
-This is the main endpoint used for the periodic update cycle.
+**Endpoint:** `POST /train`
+
+Uploads a new JSON file of messages to update the model and Pinecone index.
 
 **Inputs:**
 *   `file`: A JSON file containing the new batch of Discord messages.
-*   `banned_users_json`: A JSON string representing a list of user IDs that are currently banned.
 
-**Workflow:**
-1.  **Incremental Update**: The system reads the uploaded JSON file.
-    *   It generates fingerprints for the users in the file.
-    *   It uploads these fingerprints to Pinecone.
-    *   **Consolidation**: If a user exceeds 40 fingerprints, the system takes the oldest excess fingerprints, averages them into a single "historical" fingerprint, and deletes the individual old ones.
-2.  **Inference**: The system iterates through the provided `banned_users_json` list.
-    *   For each banned user, it retrieves their centroid (average fingerprint) from Pinecone.
-    *   It queries the index to find other users who have a high similarity to this banned user's centroid.
-
-**Example Request (`curl`):**
+**Example Request:**
 
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/process' \
+  'http://localhost:8000/train' \
   -H 'accept: application/json' \
   -H 'Content-Type: multipart/form-data' \
-  -F 'file=@/path/to/new_messages.json;type=application/json' \
-  -F 'banned_users_json=["1234567890", "0987654321"]'
+  -F 'file=@/path/to/new_messages.json;type=application/json'
+```
+
+### 2. Inference (Check Banned Users)
+
+**Endpoint:** `GET /inference`
+
+Checks for flagged users based on a provided list of banned user IDs.
+
+**Inputs:**
+*   `banned_users`: List of user IDs (query parameters).
+
+**Example Request:**
+
+```bash
+curl -X 'GET' \
+  'http://localhost:8000/inference?banned_users=1234567890&banned_users=0987654321' \
+  -H 'accept: application/json'
 ```
 
 **Example Response:**
@@ -106,5 +114,6 @@ curl -X 'POST' \
 
 To automate this process, set up a cron job or a scheduled task on your server that runs every 12 hours. This task should:
 1.  Gather the new messages from the last 12 hours into a JSON file.
-2.  Fetch the current list of banned users.
-3.  Make the `curl` request shown above to the running FastAPI service.
+2.  Call `POST /train` with the new file.
+3.  Fetch the current list of banned users.
+4.  Call `GET /inference` with the list of banned users.
