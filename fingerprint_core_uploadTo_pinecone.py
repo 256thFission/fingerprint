@@ -19,8 +19,10 @@ from pathlib import Path
 import pickle
 import logging
 import re
+import os
 from collections import Counter
 import torch.nn.functional as F
+from pinecone import Pinecone, ServerlessSpec
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -259,6 +261,36 @@ class FingerprintingSystem:
         
         return df
     
+    def load_data_safe(self, max_records: int = 500000) -> pd.DataFrame:
+        """Load data safely, using chunks for large JSON files to avoid OOM"""
+        if self.config.data_path.endswith('.json'):
+            if not os.path.exists(self.config.data_path):
+                 raise FileNotFoundError(f"File not found: {self.config.data_path}")
+                 
+            logger.info(f"Loading data from {self.config.data_path}...")
+            
+            chunks = []
+            total_loaded = 0
+            try:
+                # Read in chunks to avoid loading entire file into RAM at once
+                chunk_iterator = pd.read_json(self.config.data_path, lines=True, chunksize=10000)
+                for chunk in chunk_iterator:
+                    chunks.append(chunk)
+                    total_loaded += len(chunk)
+                    if max_records and total_loaded >= max_records:
+                        logger.info(f"Reached safety limit of {max_records} records. Stopping load.")
+                        break
+                
+                if not chunks:
+                    return pd.DataFrame()
+                    
+                return pd.concat(chunks, ignore_index=True)
+            except ValueError:
+                # Fallback for small files that might not like chunksize
+                return pd.read_json(self.config.data_path, lines=True)
+        else:
+            return self.load_data(use_cache=True)
+    
     def prepare_dataset(self, df: pd.DataFrame) -> Tuple:
         """Prepare train/val/test datasets"""
         all_fingerprints = []
@@ -384,27 +416,76 @@ class FingerprintingSystem:
     
     def evaluate(self, test_X, test_y, method='cosine') -> Dict:
         """Evaluate model"""
+        train_emb = None
+        device = torch.device(self.config.device)
+
+        # 1. Calculate similarities for all test fingerprints (Fingerprint Level)
         if method == 'cosine':
             test_scaled = self.scaler.transform(test_X)
             similarities = cosine_similarity(test_scaled, self.train_fingerprints)
         elif method == 'siamese' and self.siamese_model:
-            device = torch.device(self.config.device)
-            test_emb = self.siamese_model(torch.tensor(test_X, dtype=torch.float32).to(device))
-            train_emb = self.siamese_model(torch.tensor(self.train_fingerprints, dtype=torch.float32).to(device))
-            similarities = torch.mm(test_emb, train_emb.T).cpu().numpy()
+            self.siamese_model.eval()
+            with torch.no_grad():
+                test_tensor = torch.tensor(test_X, dtype=torch.float32).to(device)
+                train_tensor = torch.tensor(self.train_fingerprints, dtype=torch.float32).to(device)
+                
+                test_emb = self.siamese_model(test_tensor)
+                train_emb = self.siamese_model(train_tensor)
+                
+                similarities = torch.mm(test_emb, train_emb.T).cpu().numpy()
         else:
             return {}
         
-        # Top-k accuracy
+        # --- Metric 1: Per-Fingerprint Accuracy (Legacy/Granular) ---
         n_test = similarities.shape[0]
         sorted_indices = np.argsort(-similarities, axis=1)
         
-        top1_correct = sum(1 for i in range(n_test) if self.train_labels[sorted_indices[i, 0]] == test_y[i])
-        top5_correct = sum(1 for i in range(n_test) if test_y[i] in self.train_labels[sorted_indices[i, :5]])
+        fp_top1 = sum(1 for i in range(n_test) if self.train_labels[sorted_indices[i, 0]] == test_y[i])
+        fp_top5 = sum(1 for i in range(n_test) if test_y[i] in self.train_labels[sorted_indices[i, :5]])
         
+        # --- Metric 2: User-Level Accuracy (Representative Embedding) ---
+        # Simulate the client scenario: Combine all test segments for a user into one query vector
+        unique_test_users = np.unique(test_y)
+        user_top1 = 0
+        user_top5 = 0
+        
+        for user in unique_test_users:
+            # Find indices for this user in the test set
+            user_indices = np.where(test_y == user)[0]
+            
+            # Create representative fingerprint (mean of all test windows)
+            # This approximates creating one large fingerprint from all test messages
+            user_vectors = test_X[user_indices]
+            avg_vector = np.mean(user_vectors, axis=0).reshape(1, -1)
+            
+            # Calculate similarity for this single representative vector
+            if method == 'cosine':
+                avg_scaled = self.scaler.transform(avg_vector)
+                avg_sim = cosine_similarity(avg_scaled, self.train_fingerprints)[0]
+            elif method == 'siamese' and self.siamese_model:
+                with torch.no_grad():
+                    avg_tensor = torch.tensor(avg_vector, dtype=torch.float32).to(device)
+                    avg_emb = self.siamese_model(avg_tensor)
+                    # Reuse train_emb from above
+                    avg_sim = torch.mm(avg_emb, train_emb.T).cpu().numpy()[0]
+            
+            # Check top-k for this user
+            top_k_indices = np.argsort(-avg_sim)[:5]
+            top_k_labels = self.train_labels[top_k_indices]
+            
+            if top_k_labels[0] == user:
+                user_top1 += 1
+            if user in top_k_labels:
+                user_top5 += 1
+
         return {
-            'top_1_accuracy': top1_correct / n_test,
-            'top_5_accuracy': top5_correct / n_test,
+            'fingerprint_top_1_accuracy': fp_top1 / n_test,
+            'fingerprint_top_5_accuracy': fp_top5 / n_test,
+            'user_top_1_accuracy': user_top1 / len(unique_test_users),
+            'user_top_5_accuracy': user_top5 / len(unique_test_users),
+            # Map standard keys to User-Level metrics as this is the primary goal now
+            'top_1_accuracy': user_top1 / len(unique_test_users),
+            'top_5_accuracy': user_top5 / len(unique_test_users),
         }
     
     def save(self):
@@ -436,3 +517,41 @@ class FingerprintingSystem:
         system.threshold = model_data['threshold']
         
         return system
+    
+    def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints-full3"):
+        """Upload trained fingerprints to Pinecone for querying."""
+        if self.train_fingerprints is None or self.train_labels is None:
+            raise ValueError("No trained fingerprints to upload. Train the model first.")
+        
+        pc = Pinecone(api_key=api_key)
+        
+        # Create index if it doesn't exist (adjust dimensions based on fingerprint size)
+        if index_name not in pc.list_indexes().names():
+            pc.create_index(
+                name=index_name,
+                dimension=self.train_fingerprints.shape[1],
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud="aws",
+                    region="us-east-1"
+                )
+            )
+        
+        index = pc.Index(index_name)
+        
+        # Prepare vectors for upsert: unique ID, vector, metadata
+        vectors = []
+        for i, (fp, label) in enumerate(zip(self.train_fingerprints, self.train_labels)):
+            vectors.append({
+                "id": f"{label}_{i}",  # Unique ID: user_id + index
+                "values": fp.tolist(),
+                "metadata": {"user_id": str(label)}
+            })
+        
+        # Upsert in batches (Pinecone recommends batching for large uploads)
+        batch_size = 100
+        for j in range(0, len(vectors), batch_size):
+            batch = vectors[j:j + batch_size]
+            index.upsert(vectors=batch)
+        
+        logger.info(f"Uploaded {len(vectors)} fingerprints to Pinecone index '{index_name}'")

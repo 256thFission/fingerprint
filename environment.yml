@@ -18,8 +18,9 @@ dependencies:
 
   # --- Pip Packages ---
   - pip:
+    - pinecone
     # First, specify the custom index URL
-    - --index-url https://download.pytorch.org/whl/cu126
+    - --extra-index-url https://download.pytorch.org/whl/cu126
     
     # Now, list the packages to install from that index
     - torch
