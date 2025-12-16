@@ -39,7 +39,7 @@ def get_config():
     return FingerprintConfig(
         data_path="test.json",
         cache_path="cached_test_server.parquet", 
-        model_path="models/modelTest.pkl",
+        model_path="Parameters/modelTest.pkl",
         max_users=None,
         
         # Adjusted for Full Server:
@@ -156,7 +156,7 @@ def train():
     
     logger.info("Creating fingerprints...")
     try:
-        train_X, train_y, val_X, val_y, test_X, test_y = system.prepare_dataset(df)
+        train_X, train_y, val_X, val_y, test_X, test_y, weight_X, weight_y = system.prepare_dataset(df)
     except ValueError as e:
         logger.error(f"Error preparing dataset: {e}")
         logger.info("Tip: Check if min_messages or messages_per_fingerprint are too high for your dataset.")
@@ -198,7 +198,7 @@ if __name__ == "__main__":
         start_time = time.time()
         config = get_config()
         config.use_siamese = True
-        config.model_path = "models/siamese_model.pkl"
+        config.model_path = "Parameters/siamese_model.pkl"
         system = FingerprintingSystem(config)
         
         logger.info("Loading data...")
@@ -206,7 +206,7 @@ if __name__ == "__main__":
         df = preprocess_data(df)
         
         try:
-            train_X, train_y, val_X, val_y, test_X, test_y = system.prepare_dataset(df)
+            train_X, train_y, val_X, val_y, test_X, test_y, weight_X, weight_y = system.prepare_dataset(df)
             
             logger.info("Training Siamese...")
             train_scaled = system.scaler.transform(train_X)

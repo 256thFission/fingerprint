@@ -41,7 +41,7 @@ def get_config():
     return FingerprintConfig(
         data_path="583446050929639444.json",
         cache_path="cached_test_server.parquet", 
-        model_path="models/modelTest.pkl",
+        model_path="Parameters/modelTest.pkl",
         max_users=None,
         
         # Adjusted for Full Server:
@@ -316,7 +316,7 @@ if __name__ == "__main__":
         start_time = time.time()
         config = get_config()
         config.use_siamese = True
-        config.model_path = "models/siamese_model.pkl"
+        config.model_path = "Parameters/siamese_model.pkl"
         system = FingerprintingSystem(config)
         
         logger.info("Loading data...")
