@@ -18,42 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import pickle
 import logging
-import re
 import os
-from collections import Counter
 import torch.nn.functional as F
 from pinecone import Pinecone, ServerlessSpec
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FingerprintConfig:
-    data_path: str = "data/messages.json"
-    cache_path: str = "data/cached_messages.parquet"
-    model_path: str = "models/model.pkl"
-    min_messages: int = 100
-    messages_per_fingerprint: int = 100
-    window_step_size: int = 50
-    max_fingerprints_per_user: int = 30
-    max_users: Optional[int] = None
-    aggregation_method: str = 'percentile'
-    train_ratio: float = 0.70
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
-    use_siamese: bool = False
-    siamese_embedding_dim: int = 128
-    siamese_epochs: int = 20
-    siamese_batch_size: int = 64
-    siamese_lr: float = 1e-3
-    match_threshold: float = 0.5
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    def validate(self):
-        assert abs(self.train_ratio + self.val_ratio + self.test_ratio - 1.0) < 1e-6
-        assert self.aggregation_method in ['percentile', 'mean']
-
+# from model.feature_extraction import aggregate_embeddings, extract_linguistic_features, extract_temporal_features
 
 def extract_linguistic_features(texts: List[str]) -> np.ndarray:
     """Extract basic linguistic features"""
@@ -140,6 +108,63 @@ def extract_temporal_features(timestamps: pd.Series) -> Tuple[np.ndarray, np.nda
     
     return hour_density, dow_density, wom_density
 
+def detect_gap_threshold_jump(time_deltas: np.ndarray, min_ratio=2.5) -> float:
+    """
+    Detects a natural 'jump' (break) in time delta distribution using ratio comparison.
+    Returns threshold value (within conversation vs between conversation)
+
+    e.g. 2, 4, 6, 7, 7, 12, 14, 20, 30, 66, 67, 505, 1038, 46315
+    the threshold should be 505
+    """
+    td = np.sort(time_deltas[time_deltas > 0])
+    if len(td) < 4:
+        return np.median(td) * 2 if len(td) > 0 else 600 # Default to 10 minutes if not enough data
+
+    ratios = td[1:] / td[:-1]
+
+    # Find where the ratio jumps most significantly
+    # You can use either maximum ratio or first ratio > min_ratio
+    idx_jump = np.nonzero(ratios > min_ratio)[0][0] if np.any(ratios > min_ratio) else -1
+
+    # If no strong ratio found, assume all messages are in the same conversation
+    if idx_jump == -1:
+        return 1e9
+
+
+    # Return midpoint between values forming that jump
+    threshold = 0.5 * (td[idx_jump] + td[idx_jump + 1])
+    return threshold
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FingerprintConfig:
+    data_path: str = "data/messages.json"
+    cache_path: str = "data/cached_messages.parquet"
+    model_path: str = "Parameters/model.pkl"
+    min_messages: int = 100
+    min_messages_per_fingerprint: int = 100
+    window_step_size: int = 50
+    max_fingerprints_per_user: int = 30
+    max_users: Optional[int] = None
+    aggregation_method: str = 'percentile'
+    train_ratio: float = 0.70
+    val_ratio: float = 0.15
+    test_ratio: float = 0.15
+    use_siamese: bool = False
+    siamese_embedding_dim: int = 128
+    siamese_epochs: int = 20
+    siamese_batch_size: int = 64
+    siamese_lr: float = 1e-3
+    match_threshold: float = 0.5
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    def validate(self):
+        assert abs(self.train_ratio + self.val_ratio + self.test_ratio - 1.0) < 1e-6
+        assert self.aggregation_method in ['percentile', 'mean']
+
 
 def evaluate_matching(predictions: List[Optional[str]], true_labels: List[str]) -> Dict[str, float]:
     """Evaluate matching performance"""
@@ -173,18 +198,19 @@ class FingerprintExtractor:
         self.model = SentenceTransformer("AnnaWegmann/Style-Embedding", device=config.device)
         self._embedding_cache = {}
         
-    def create_fingerprint(self, messages: pd.DataFrame) -> Optional[np.ndarray]:
+    def create_fingerprint(self, messages: list, timestamps: list) -> Optional[np.ndarray]:
         """Create single fingerprint from messages"""
-        texts = messages["content"].fillna("").astype(str).values
+        texts = [str(m or "") for m in messages]
         texts = [t for t in texts if t.strip()]
         
-        if len(texts) < self.config.messages_per_fingerprint // 2:
+        if len(texts) < self.config.min_messages_per_fingerprint // 2:  
             return None
         
         embeddings = self.model.encode(texts, show_progress_bar=False, batch_size=32)
         text_features = aggregate_embeddings(embeddings, method=self.config.aggregation_method)
         linguistic_features = extract_linguistic_features(texts)
-        hour_density, dow_density, wom_density = extract_temporal_features(messages["timestamp"])
+        timestamps = pd.DataFrame(timestamps, columns=["timestamp"])
+        hour_density, dow_density, wom_density = extract_temporal_features(timestamps["timestamp"])
         
         fingerprint = np.concatenate([
             text_features,
@@ -196,25 +222,94 @@ class FingerprintExtractor:
         
         return fingerprint
     
-    def create_fingerprints_for_user(self, user_messages: pd.DataFrame) -> List[np.ndarray]:
-        """Create multiple fingerprints for user"""
+    def create_fingerprints_for_user(self, user_messages: pd.DataFrame, current_avg_threshold: Optional[float] = None) -> Tuple[List[np.ndarray], List[int], float]:
+        """Create multiple fingerprints for user with adaptive thresholding"""
         fingerprints = []
         n_messages = len(user_messages)
+
+        if n_messages == 0:
+            return fingerprints, [], current_avg_threshold or 600.0
         
-        for start_idx in range(0, n_messages - self.config.messages_per_fingerprint + 1, 
-                              self.config.window_step_size):
-            if (self.config.max_fingerprints_per_user and 
-                len(fingerprints) >= self.config.max_fingerprints_per_user):
-                break
+        user_messages = user_messages.sort_values("timestamp").reset_index(drop=True)
+
+        time_deltas = user_messages["timestamp"].diff().dropna().dt.total_seconds()
+        max_fp = getattr(self.config, "max_fingerprints_per_user", None)
+        
+        # 1. Calculate local threshold for this batch
+        local_threshold = detect_gap_threshold_jump(time_deltas.values)
+        
+        # 2. Apply Moving Average Logic
+        # If we have history and the local threshold is valid (not the 1e9 fallback)
+        if current_avg_threshold is not None and local_threshold < 1e8:
+            alpha = 0.3 # Weight for new data (adjust as needed)
+            adaptive_gap_threshold = (alpha * local_threshold) + ((1 - alpha) * current_avg_threshold)
+        elif local_threshold < 1e8:
+            # No history, use local
+            adaptive_gap_threshold = local_threshold
+        else:
+            # Local is invalid (no jumps found), use history or default
+            adaptive_gap_threshold = current_avg_threshold if current_avg_threshold else 600.0
+
+        divider = getattr(self.config, "conversation_divider", "<|DIV|>")
+
+        grouped = []
+        current_group = [user_messages.iloc[0]["content"]]
+        timestamps = [user_messages.iloc[0]["timestamp"]]
+
+        for i in range(1, len(user_messages)):
+            prev_ts = user_messages.iloc[i - 1]["timestamp"]
+            cur_ts = user_messages.iloc[i]["timestamp"]
+            gap = (cur_ts - prev_ts).total_seconds()
+        
+            if gap > adaptive_gap_threshold:
+                # new conversation starts -> store the old one
+                grouped.append({
+                    "content": divider.join(current_group),
+                    "timestamps": timestamps
+                })
+                current_group = [user_messages.iloc[i]["content"]]
+                timestamps = [user_messages.iloc[i]["timestamp"]]
+            else:
+                current_group.append(user_messages.iloc[i]["content"])
+                timestamps.append(user_messages.iloc[i]["timestamp"])
+
+        # push last conversation group
+        if current_group:
+            grouped.append({
+                "content": divider.join(current_group),
+                "timestamps": timestamps
+            })
+        
+        combined_texts = [g["content"] for g in grouped]
+        timestamps = [g["timestamps"] for g in grouped]
+        weights = [len(g["timestamps"]) for g in grouped]
+
+        end_idx = -1
+        cur_weight = 0
+        while(end_idx < len(grouped) - 1):
+            if (max_fp is not None and 
+                len(fingerprints) >= max_fp):
+                break 
             
-            end_idx = start_idx + self.config.messages_per_fingerprint
-            window = user_messages.iloc[start_idx:end_idx]
+            end_idx += 1
+            start_idx = end_idx
+            cur_weight += weights[end_idx]
+            while(end_idx + 1 < len(grouped) and cur_weight < self.config.min_messages_per_fingerprint):
+                cur_weight += weights[end_idx + 1]
+                end_idx += 1
+
+            window_text = combined_texts[start_idx:end_idx + 1]
+            window_timestamps = []
+            for i in range(start_idx, end_idx + 1):
+                window_timestamps.extend(timestamps[i])
             
-            fingerprint = self.create_fingerprint(window)
+            fingerprint = self.create_fingerprint(window_text, window_timestamps)
             if fingerprint is not None:
                 fingerprints.append(fingerprint)
+            
+            cur_weight = 0
         
-        return fingerprints
+        return fingerprints, weights, adaptive_gap_threshold
 
 
 class SimpleSiameseNetwork(nn.Module):
@@ -245,6 +340,7 @@ class FingerprintingSystem:
         self.train_fingerprints = None
         self.train_labels = None
         self.threshold = config.match_threshold
+        self.user_temporal_stats = {} # Add storage for user profiles
         
     def load_data(self, use_cache: bool = True) -> pd.DataFrame:
         """Load message data"""
@@ -295,6 +391,7 @@ class FingerprintingSystem:
         """Prepare train/val/test datasets"""
         all_fingerprints = []
         all_labels = []
+        all_weights = []
         
         user_counts = df['ids'].value_counts()
         valid_users = user_counts[user_counts >= self.config.min_messages].index
@@ -306,21 +403,32 @@ class FingerprintingSystem:
         
         for user_id in valid_users:
             user_messages = df[df['ids'] == user_id].sort_values('timestamp')
-            fingerprints = self.extractor.create_fingerprints_for_user(user_messages)
             
-            for fp in fingerprints:
+            # Retrieve existing profile for this user
+            prev_threshold = self.user_temporal_stats.get(user_id)
+            
+            # Generate fingerprints and get updated threshold
+            fingerprints, weights, new_threshold = self.extractor.create_fingerprints_for_user(user_messages, prev_threshold)
+            
+            # Update the persistent profile
+            self.user_temporal_stats[user_id] = new_threshold
+            
+            for i, fp in enumerate(fingerprints):
                 all_fingerprints.append(fp)
                 all_labels.append(user_id)
+                all_weights.append(weights[i])
         
         if not all_fingerprints:
             raise ValueError("No fingerprints created")
         
         X = np.array(all_fingerprints)
         y = np.array(all_labels)
+        W = np.array(all_weights)
         
         # Time-based split
         unique_users = np.unique(y)
         train_X, train_y, val_X, val_y, test_X, test_y = [], [], [], [], [], []
+        weights_X, weights_y = [], []
         
         for user in unique_users:
             user_indices = np.where(y == user)[0]
@@ -335,15 +443,36 @@ class FingerprintingSystem:
             val_y.extend(y[user_indices[train_end:val_end]])
             test_X.extend(X[user_indices[val_end:]])
             test_y.extend(y[user_indices[val_end:]])
+            weights_X.extend(W[user_indices[:train_end]])
+            weights_y.extend(W[user_indices[train_end:val_end]])
         
         return (np.array(train_X), np.array(train_y), 
                 np.array(val_X), np.array(val_y),
-                np.array(test_X), np.array(test_y))
+                np.array(test_X), np.array(test_y),
+                np.array(weights_X), np.array(weights_y))
     
     def train_cosine_similarity(self, train_X, train_y, val_X, val_y):
         """Train cosine similarity baseline"""
-        self.train_fingerprints = self.scaler.fit_transform(train_X)
+        if len(train_X) == 0:
+            logger.warning("Training set is empty.")
+            return
+
+        if len(train_X) == 1:
+            logger.warning("Training set has only 1 sample. Skipping scaling to avoid zero vectors.")
+            # Manually set scaler to identity to avoid zeroing out the single vector
+            self.scaler.mean_ = np.zeros(train_X.shape[1])
+            self.scaler.scale_ = np.ones(train_X.shape[1])
+            self.scaler.var_ = np.ones(train_X.shape[1])
+            self.scaler.n_samples_seen_ = 1
+            self.train_fingerprints = train_X
+        else:
+            self.train_fingerprints = self.scaler.fit_transform(train_X)
+            
         self.train_labels = train_y
+        
+        if len(val_X) == 0:
+            logger.warning("Validation set is empty. Skipping threshold tuning.")
+            return
         
         # Simple threshold tuning
         val_scaled = self.scaler.transform(val_X)
@@ -416,6 +545,10 @@ class FingerprintingSystem:
     
     def evaluate(self, test_X, test_y, method='cosine') -> Dict:
         """Evaluate model"""
+        if len(test_X) == 0:
+            logger.warning("Test set is empty.")
+            return {}
+
         train_emb = None
         device = torch.device(self.config.device)
 
@@ -497,6 +630,7 @@ class FingerprintingSystem:
             'train_fingerprints': self.train_fingerprints,
             'train_labels': self.train_labels,
             'threshold': self.threshold,
+            'user_temporal_stats': self.user_temporal_stats, # Save the stats
         }
         
         Path(self.config.model_path).parent.mkdir(parents=True, exist_ok=True)
@@ -515,10 +649,11 @@ class FingerprintingSystem:
         system.train_fingerprints = model_data['train_fingerprints']
         system.train_labels = model_data['train_labels']
         system.threshold = model_data['threshold']
+        system.user_temporal_stats = model_data.get('user_temporal_stats', {}) # Load the stats
         
         return system
     
-    def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints-full3"):
+    def upload_to_pinecone(self, api_key: str, index_name: str = "discord-fingerprints-full-Batching"):
         """Upload trained fingerprints to Pinecone for querying."""
         if self.train_fingerprints is None or self.train_labels is None:
             raise ValueError("No trained fingerprints to upload. Train the model first.")

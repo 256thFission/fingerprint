@@ -49,7 +49,7 @@ def get_config():
         min_messages=100, 
         
         # 2. Stability
-        messages_per_fingerprint=50,
+        min_messages_per_fingerprint=50,
         
         # 3. Overlap
         window_step_size=25,
@@ -274,10 +274,10 @@ def train():
     
     logger.info("Creating fingerprints...")
     try:
-        train_X, train_y, val_X, val_y, test_X, test_y = system.prepare_dataset(df)
+        train_X, train_y, val_X, val_y, test_X, test_y, train_weights, val_weights = system.prepare_dataset(df)
     except ValueError as e:
         logger.error(f"Error preparing dataset: {e}")
-        logger.info("Tip: Check if min_messages or messages_per_fingerprint are too high for your dataset.")
+        logger.info("Tip: Check if min_messages or min_messages_per_fingerprint are too high for your dataset.")
         return
 
     logger.info(f"Train: {len(train_X)} fingerprints from {len(np.unique(train_y))} users")

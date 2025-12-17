@@ -44,17 +44,17 @@ def setup_logging():
 def get_config():
     """Default training configuration"""
     return FingerprintConfig(
-        data_path="test.json",
+        data_path="583446050929639444.json",
         cache_path="cached_test_server.parquet", 
         model_path="models/modelTest.pkl",
         max_users=None,
         
         # Adjusted for Full Server:
         # 1. Filter noise
-        min_messages=2, 
+        min_messages=50, 
         
         # 2. Stability
-        messages_per_fingerprint=5,
+        min_messages_per_fingerprint=5,
         
         # 3. Overlap
         window_step_size=2,
@@ -115,35 +115,38 @@ def plot_results(df, train_y, val_y, test_y, system, val_X, output_dir="plots"):
     # 3. Threshold Tuning Curve (Re-evaluating on validation set)
     try:
         if hasattr(system, 'train_fingerprints') and system.train_fingerprints is not None:
-            logger.info("Generating threshold tuning curve...")
-            val_scaled = system.scaler.transform(val_X)
-            similarities = cosine_similarity(val_scaled, system.train_fingerprints)
-            
-            thresholds = np.linspace(0.1, 0.9, 50)
-            accuracies = []
-            
-            for thresh in thresholds:
-                correct = 0
-                total = 0
-                for i, sim_row in enumerate(similarities):
-                    idx = np.argmax(sim_row)
-                    # Only count as a prediction if score > threshold
-                    if sim_row[idx] > thresh:
-                        pred = system.train_labels[idx]
-                        if pred == val_y[i]:
-                            correct += 1
-                    total += 1 
+            if len(val_X) == 0:
+                logger.info("Validation set empty, skipping threshold tuning curve.")
+            else:
+                logger.info("Generating threshold tuning curve...")
+                val_scaled = system.scaler.transform(val_X)
+                similarities = cosine_similarity(val_scaled, system.train_fingerprints)
                 
-                accuracies.append(correct / total if total > 0 else 0)
+                thresholds = np.linspace(0.1, 0.9, 50)
+                accuracies = []
                 
-            plt.figure(figsize=(10, 6))
-            plt.plot(thresholds, accuracies, marker='o', linestyle='-', color='purple')
-            plt.title("Accuracy vs. Matching Threshold (Validation Set)")
-            plt.xlabel("Cosine Similarity Threshold")
-            plt.ylabel("Accuracy")
-            plt.grid(True)
-            plt.savefig(f"{output_dir}/threshold_tuning.png")
-            plt.close()
+                for thresh in thresholds:
+                    correct = 0
+                    total = 0
+                    for i, sim_row in enumerate(similarities):
+                        idx = np.argmax(sim_row)
+                        # Only count as a prediction if score > threshold
+                        if sim_row[idx] > thresh:
+                            pred = system.train_labels[idx]
+                            if pred == val_y[i]:
+                                correct += 1
+                        total += 1 
+                    
+                    accuracies.append(correct / total if total > 0 else 0)
+                    
+                plt.figure(figsize=(10, 6))
+                plt.plot(thresholds, accuracies, marker='o', linestyle='-', color='purple')
+                plt.title("Accuracy vs. Matching Threshold (Validation Set)")
+                plt.xlabel("Cosine Similarity Threshold")
+                plt.ylabel("Accuracy")
+                plt.grid(True)
+                plt.savefig(f"{output_dir}/threshold_tuning.png")
+                plt.close()
     except Exception as e:
         logger.error(f"Failed to plot threshold curve: {e}")
 
@@ -159,17 +162,17 @@ def train(data_path=None):
     
     logger.info(f"Loading data from {config.data_path}...")
     # Set max_records to None to load the entire file in chunks
-    df = system.load_data_safe(max_records=None)
+    df = system.load_data_safe(max_records=500000)
     df = preprocess_data(df)
     
     logger.info(f"Loaded {len(df)} messages from {df['ids'].nunique()} users")
     
     logger.info("Creating fingerprints...")
     try:
-        train_X, train_y, val_X, val_y, test_X, test_y = system.prepare_dataset(df)
+        train_X, train_y, val_X, val_y, test_X, test_y, train_weights, val_weights = system.prepare_dataset(df)
     except ValueError as e:
         logger.error(f"Error preparing dataset: {e}")
-        logger.info("Tip: Check if min_messages or messages_per_fingerprint are too high for your dataset.")
+        logger.info("Tip: Check if min_messages or min_messages_per_fingerprint are too high for your dataset.")
         return
 
     logger.info(f"Train: {len(train_X)} fingerprints from {len(np.unique(train_y))} users")
@@ -234,9 +237,9 @@ def run_incremental(data_path):
     
     logger.info("Creating fingerprints...")
     try:
-        # prepare_dataset returns: train_X, train_y, train_t, val_X, val_y, val_t, test_X, test_y, test_t
+        # prepare_dataset returns: train_X, train_y, val_X, val_y, test_X, test_y, train_weights, val_weights
         # With train_ratio=1.0, everything is in train_*
-        train_X, train_y, train_t, _, _, _, _, _, _ = system.prepare_dataset(df)
+        train_X, train_y, val_X, val_y, test_X, test_y, train_weights, val_weights = system.prepare_dataset(df)
     except ValueError as e:
         logger.error(f"Error preparing dataset: {e}")
         return
@@ -254,7 +257,7 @@ def run_incremental(data_path):
     # Update system state for upload
     system.train_fingerprints = scaled_X
     system.train_labels = train_y
-    system.train_timestamps = train_t
+    # system.train_timestamps = train_t # Timestamps not returned by current prepare_dataset
     
     # Upload
     api_key = os.getenv("PINECONE_API_KEY")
