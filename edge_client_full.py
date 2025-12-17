@@ -22,7 +22,7 @@ from fingerprint_core_uploadTo_pinecone import FingerprintConfig, FingerprintExt
 
 # Configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-INDEX_NAME = "discord-fingerprints-test"
+INDEX_NAME = "discord-fingerprints-Message-Batching"
 
 
 def get_user_centroid_from_pinecone(user_id: str, 
@@ -235,8 +235,11 @@ def main() -> None:
     
     # Example user IDs from the provided test.json
     TARGET_USERS = [
-        "2f85e196681d",  # Anthony Reilly
-        "ecfeadbb695e"   # Jayson Bond
+        "00112400b0d3",
+        "5ee98fc18859",
+        "7d31f6b5473e",
+        "48657ef63a3d",
+        "29cecf8d792c"
     ]
     
     try:

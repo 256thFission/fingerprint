@@ -222,26 +222,34 @@ class FingerprintExtractor:
         
         return fingerprint
     
-    def create_fingerprints_for_user(self, user_messages: pd.DataFrame) -> List[np.ndarray]:
-        """Create multiple fingerprints for user"""
+    def create_fingerprints_for_user(self, user_messages: pd.DataFrame, current_avg_threshold: Optional[float] = None) -> Tuple[List[np.ndarray], List[int], float]:
+        """Create multiple fingerprints for user with adaptive thresholding"""
         fingerprints = []
         n_messages = len(user_messages)
 
         if n_messages == 0:
-            return fingerprints
+            return fingerprints, [], current_avg_threshold or 600.0
         
         user_messages = user_messages.sort_values("timestamp").reset_index(drop=True)
-
-        # hi humam quick question
-        # i want to make a user profile based on the timing of messages
-        # the code is written below this annotion, but how would we maintain the profile with
-        # new dataset updates? we could use a moving average but where 
-        # would that code go into?
 
         time_deltas = user_messages["timestamp"].diff().dropna().dt.total_seconds()
         max_fp = getattr(self.config, "max_fingerprints_per_user", None)
         
-        adaptive_gap_threshold = detect_gap_threshold_jump(time_deltas.values)
+        # 1. Calculate local threshold for this batch
+        local_threshold = detect_gap_threshold_jump(time_deltas.values)
+        
+        # 2. Apply Moving Average Logic
+        # If we have history and the local threshold is valid (not the 1e9 fallback)
+        if current_avg_threshold is not None and local_threshold < 1e8:
+            alpha = 0.3 # Weight for new data (adjust as needed)
+            adaptive_gap_threshold = (alpha * local_threshold) + ((1 - alpha) * current_avg_threshold)
+        elif local_threshold < 1e8:
+            # No history, use local
+            adaptive_gap_threshold = local_threshold
+        else:
+            # Local is invalid (no jumps found), use history or default
+            adaptive_gap_threshold = current_avg_threshold if current_avg_threshold else 600.0
+
         divider = getattr(self.config, "conversation_divider", "<|DIV|>")
 
         grouped = []
@@ -301,7 +309,7 @@ class FingerprintExtractor:
             
             cur_weight = 0
         
-        return fingerprints, weights
+        return fingerprints, weights, adaptive_gap_threshold
 
 
 class SimpleSiameseNetwork(nn.Module):
@@ -332,6 +340,7 @@ class FingerprintingSystem:
         self.train_fingerprints = None
         self.train_labels = None
         self.threshold = config.match_threshold
+        self.user_temporal_stats = {} # Add storage for user profiles
         
     def load_data(self, use_cache: bool = True) -> pd.DataFrame:
         """Load message data"""
@@ -394,7 +403,15 @@ class FingerprintingSystem:
         
         for user_id in valid_users:
             user_messages = df[df['ids'] == user_id].sort_values('timestamp')
-            fingerprints, weights = self.extractor.create_fingerprints_for_user(user_messages)
+            
+            # Retrieve existing profile for this user
+            prev_threshold = self.user_temporal_stats.get(user_id)
+            
+            # Generate fingerprints and get updated threshold
+            fingerprints, weights, new_threshold = self.extractor.create_fingerprints_for_user(user_messages, prev_threshold)
+            
+            # Update the persistent profile
+            self.user_temporal_stats[user_id] = new_threshold
             
             for fp in fingerprints:
                 all_fingerprints.append(fp)
@@ -590,6 +607,7 @@ class FingerprintingSystem:
             'train_fingerprints': self.train_fingerprints,
             'train_labels': self.train_labels,
             'threshold': self.threshold,
+            'user_temporal_stats': self.user_temporal_stats, # Save the stats
         }
         
         Path(self.config.model_path).parent.mkdir(parents=True, exist_ok=True)
@@ -608,6 +626,7 @@ class FingerprintingSystem:
         system.train_fingerprints = model_data['train_fingerprints']
         system.train_labels = model_data['train_labels']
         system.threshold = model_data['threshold']
+        system.user_temporal_stats = model_data.get('user_temporal_stats', {}) # Load the stats
         
         return system
     
