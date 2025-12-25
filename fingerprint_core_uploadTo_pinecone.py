@@ -33,9 +33,10 @@ class FingerprintConfig:
     data_path: str = "data/messages.json"
     cache_path: str = "data/cached_messages.parquet"
     model_path: str = "models/model.pkl"
-    min_messages: int = 100
-    messages_per_fingerprint: int = 100
+    min_messages: int = 50
+    messages_per_fingerprint: int = 50
     window_step_size: int = 50
+    session_timeout_seconds: int = 1800
     max_fingerprints_per_user: int = 30
     max_users: Optional[int] = None
     aggregation_method: str = 'percentile'
@@ -197,22 +198,46 @@ class FingerprintExtractor:
         return fingerprint
     
     def create_fingerprints_for_user(self, user_messages: pd.DataFrame) -> List[np.ndarray]:
-        """Create multiple fingerprints for user"""
+        """Create multiple fingerprints for user using time-based batching"""
         fingerprints = []
-        n_messages = len(user_messages)
         
-        for start_idx in range(0, n_messages - self.config.messages_per_fingerprint + 1, 
-                              self.config.window_step_size):
-            if (self.config.max_fingerprints_per_user and 
-                len(fingerprints) >= self.config.max_fingerprints_per_user):
-                break
+        if user_messages.empty:
+            return fingerprints
+
+        # Ensure sorted by timestamp
+        user_messages = user_messages.sort_values('timestamp')
+        
+        # Calculate time differences to identify batches
+        timestamps = pd.to_datetime(user_messages['timestamp'])
+        time_diffs = timestamps.diff()
+        
+        # Define session breaks
+        is_new_batch = time_diffs > pd.Timedelta(seconds=self.config.session_timeout_seconds)
+        batch_ids = is_new_batch.cumsum()
+        
+        current_buffer = []
+        
+        # Group by batch_id and process
+        for _, batch in user_messages.groupby(batch_ids):
+            current_buffer.append(batch)
             
-            end_idx = start_idx + self.config.messages_per_fingerprint
-            window = user_messages.iloc[start_idx:end_idx]
+            # Calculate total messages in buffer
+            total_messages = sum(len(b) for b in current_buffer)
             
-            fingerprint = self.create_fingerprint(window)
-            if fingerprint is not None:
-                fingerprints.append(fingerprint)
+            if total_messages >= self.config.messages_per_fingerprint:
+                # Combine all batches in buffer
+                combined_batch = pd.concat(current_buffer)
+                
+                fingerprint = self.create_fingerprint(combined_batch)
+                if fingerprint is not None:
+                    fingerprints.append(fingerprint)
+                    
+                # Reset buffer
+                current_buffer = []
+                
+                if (self.config.max_fingerprints_per_user and 
+                    len(fingerprints) >= self.config.max_fingerprints_per_user):
+                    break
         
         return fingerprints
 
@@ -327,7 +352,14 @@ class FingerprintingSystem:
             n = len(user_indices)
             
             train_end = int(n * self.config.train_ratio)
+            # Ensure at least one sample for training if data exists
+            if train_end == 0 and n > 0:
+                train_end = 1
+                
             val_end = int(n * (self.config.train_ratio + self.config.val_ratio))
+            # Ensure val_end is consistent
+            if val_end < train_end:
+                val_end = train_end
             
             train_X.extend(X[user_indices[:train_end]])
             train_y.extend(y[user_indices[:train_end]])
@@ -335,36 +367,47 @@ class FingerprintingSystem:
             val_y.extend(y[user_indices[train_end:val_end]])
             test_X.extend(X[user_indices[val_end:]])
             test_y.extend(y[user_indices[val_end:]])
-        
+
         return (np.array(train_X), np.array(train_y), 
                 np.array(val_X), np.array(val_y),
                 np.array(test_X), np.array(test_y))
     
     def train_cosine_similarity(self, train_X, train_y, val_X, val_y):
         """Train cosine similarity baseline"""
+        if len(train_X) == 0:
+            raise ValueError("Training data is empty. Cannot train model.")
+
         self.train_fingerprints = self.scaler.fit_transform(train_X)
         self.train_labels = train_y
         
         # Simple threshold tuning
-        val_scaled = self.scaler.transform(val_X)
-        similarities = cosine_similarity(val_scaled, self.train_fingerprints)
-        
-        best_acc = 0
-        for thresh in np.linspace(0.1, 0.9, 50):
-            predictions = []
-            for sim_row in similarities:
-                idx = np.argmax(sim_row)
-                if sim_row[idx] > thresh:
-                    predictions.append(self.train_labels[idx])
-                else:
-                    predictions.append(None)
+        if len(val_X) > 0:
+            val_scaled = self.scaler.transform(val_X)
+            similarities = cosine_similarity(val_scaled, self.train_fingerprints)
             
-            metrics = evaluate_matching(predictions, val_y)
-            if metrics['accuracy'] > best_acc:
-                best_acc = metrics['accuracy']
-                self.threshold = thresh
-        
-        logger.info(f"Best threshold: {self.threshold:.3f}")
+            best_acc = 0
+            best_thresh = self.threshold
+            
+            for thresh in np.linspace(0.1, 0.9, 50):
+                correct = 0
+                total = 0
+                for i, sim_row in enumerate(similarities):
+                    idx = np.argmax(sim_row)
+                    if sim_row[idx] > thresh:
+                        pred = self.train_labels[idx]
+                        if pred == val_y[i]:
+                            correct += 1
+                    total += 1
+                
+                acc = correct / total if total > 0 else 0
+                if acc > best_acc:
+                    best_acc = acc
+                    best_thresh = thresh
+            
+            self.threshold = best_thresh
+            logger.info(f"Best threshold: {self.threshold:.3f}")
+        else:
+            logger.info("Skipping threshold tuning (no validation data)")
     
     def train_siamese_network(self, train_X, train_y, val_X, val_y):
         """Train Siamese network"""

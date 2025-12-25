@@ -46,7 +46,7 @@ def get_config():
         
         # Adjusted for Full Server:
         # 1. Filter noise
-        min_messages=100, 
+        min_messages=50, 
         
         # 2. Stability
         messages_per_fingerprint=50,
