@@ -14,6 +14,10 @@ import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.decomposition import PCA
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 log_dir = os.path.join(os.path.dirname(__file__), "logs")
@@ -51,8 +55,9 @@ def get_config():
         # 2. Stability
         messages_per_fingerprint=100,
         
-        # 3. Time-Based Batching (Replaces window_step_size)
-        session_timeout_seconds=1800, # 30 minutes
+        # 3. Time-Based Clustering (DBSCAN epsilon)
+        # Defines the max gap (in seconds) between messages to be considered part of the same session/cluster
+        session_timeout_seconds=120, # 30 minutes
         
         # 4. Storage/Diversity
         max_fingerprints_per_user=40,

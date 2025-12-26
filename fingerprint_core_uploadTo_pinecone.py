@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import DBSCAN
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 from pathlib import Path
@@ -198,7 +199,7 @@ class FingerprintExtractor:
         return fingerprint
     
     def create_fingerprints_for_user(self, user_messages: pd.DataFrame) -> List[np.ndarray]:
-        """Create multiple fingerprints for user using time-based batching"""
+        """Create multiple fingerprints for user using timestamp clustering"""
         fingerprints = []
         
         if user_messages.empty:
@@ -207,37 +208,47 @@ class FingerprintExtractor:
         # Ensure sorted by timestamp
         user_messages = user_messages.sort_values('timestamp')
         
-        # Calculate time differences to identify batches
-        timestamps = pd.to_datetime(user_messages['timestamp'])
-        time_diffs = timestamps.diff()
+        # Convert timestamps to seconds for clustering
+        timestamps = pd.to_datetime(user_messages['timestamp'], errors='coerce')
         
-        # Define session breaks
-        is_new_batch = time_diffs > pd.Timedelta(seconds=self.config.session_timeout_seconds)
-        batch_ids = is_new_batch.cumsum()
-        
-        current_buffer = []
-        
-        # Group by batch_id and process
-        for _, batch in user_messages.groupby(batch_ids):
-            current_buffer.append(batch)
+        # Filter out invalid timestamps
+        valid_mask = timestamps.notna()
+        if not valid_mask.any():
+            return []
             
-            # Calculate total messages in buffer
-            total_messages = sum(len(b) for b in current_buffer)
-            
-            if total_messages >= self.config.messages_per_fingerprint:
-                # Combine all batches in buffer
-                combined_batch = pd.concat(current_buffer)
+        user_messages = user_messages.loc[valid_mask]
+        timestamps = timestamps.loc[valid_mask]
+        
+        # Convert to unix timestamp (seconds). 
+        # Note: astype(np.int64) on datetime64[ns] gives nanoseconds
+        X = timestamps.astype(np.int64) // 10**9
+        X = X.values.reshape(-1, 1)
+        
+        # Use DBSCAN to cluster messages based on time proximity
+        # eps: max time gap in seconds (session_timeout_seconds)
+        # min_samples: 1 ensures we keep all points initially, then filter by size
+        clustering = DBSCAN(eps=self.config.session_timeout_seconds, min_samples=1).fit(X)
+        
+        labels = clustering.labels_
+        unique_labels = np.unique(labels)
+        
+        for label in unique_labels:
+            if label == -1:
+                continue
                 
-                fingerprint = self.create_fingerprint(combined_batch)
+            # Get messages for this cluster
+            mask = labels == label
+            cluster_batch = user_messages.iloc[mask]
+            
+            # Only process if cluster meets minimum size requirement
+            if len(cluster_batch) >= self.config.messages_per_fingerprint:
+                fingerprint = self.create_fingerprint(cluster_batch)
                 if fingerprint is not None:
                     fingerprints.append(fingerprint)
-                    
-                # Reset buffer
-                current_buffer = []
-                
-                if (self.config.max_fingerprints_per_user and 
-                    len(fingerprints) >= self.config.max_fingerprints_per_user):
-                    break
+            
+            if (self.config.max_fingerprints_per_user and 
+                len(fingerprints) >= self.config.max_fingerprints_per_user):
+                break
         
         return fingerprints
 

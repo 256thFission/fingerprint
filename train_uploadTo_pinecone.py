@@ -44,7 +44,7 @@ def setup_logging():
 def get_config():
     """Default training configuration"""
     return FingerprintConfig(
-        data_path="583446050929639444.json",
+        data_path="contrastive_test_set.json",
         cache_path="cached_test_server.parquet", 
         model_path="models/modelTest.pkl",
         max_users=None,
@@ -56,8 +56,9 @@ def get_config():
         # 2. Stability
         messages_per_fingerprint=100,
         
-        # 3. Time-Based Batching (Replaces window_step_size)
-        session_timeout_seconds=1800, # 30 minutes
+        # 3. Time-Based Clustering (DBSCAN epsilon)
+        # Defines the max gap (in seconds) between messages to be considered part of the same session/cluster
+        session_timeout_seconds=120, # 30 minutes
         
         # 4. Storage/Diversity
         max_fingerprints_per_user=40,
@@ -235,9 +236,9 @@ def run_incremental(data_path):
     
     logger.info("Creating fingerprints...")
     try:
-        # prepare_dataset returns: train_X, train_y, train_t, val_X, val_y, val_t, test_X, test_y, test_t
+        # prepare_dataset returns: train_X, train_y, val_X, val_y, test_X, test_y
         # With train_ratio=1.0, everything is in train_*
-        train_X, train_y, train_t, _, _, _, _, _, _ = system.prepare_dataset(df)
+        train_X, train_y, _, _, _, _ = system.prepare_dataset(df)
     except ValueError as e:
         logger.error(f"Error preparing dataset: {e}")
         return
@@ -255,7 +256,6 @@ def run_incremental(data_path):
     # Update system state for upload
     system.train_fingerprints = scaled_X
     system.train_labels = train_y
-    system.train_timestamps = train_t
     
     # Upload
     api_key = os.getenv("PINECONE_API_KEY")
