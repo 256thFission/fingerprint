@@ -41,8 +41,8 @@ def run_diagnostic(args):
         model_path="diagnostic_model.pkl",
         min_messages=5,  # Lowered for test.json
         messages_per_fingerprint=5, # Lowered for test.json
-        window_step_size=2,
-        max_fingerprints_per_user=5,
+        session_timeout_seconds=60, # Short timeout for testing
+        max_fingerprints_per_user=5,# filepath: /home/humam/Discord_Data_Analysis/Fingerprint/fingerprintHumam/fingerprint/diagnostic_check.py
         train_ratio=0.6,
         val_ratio=0.2,
         test_ratio=0.2,

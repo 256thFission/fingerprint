@@ -39,20 +39,20 @@ logger = logging.getLogger(__name__)
 def get_config():
     """Default training configuration"""
     return FingerprintConfig(
-        data_path="583446050929639444.json",
+        data_path="contrastive_test_set.json",
         cache_path="cached_test_server.parquet", 
         model_path="models/modelTest.pkl",
         max_users=None,
         
         # Adjusted for Full Server:
         # 1. Filter noise
-        min_messages=50, 
+        min_messages=100, 
         
         # 2. Stability
-        messages_per_fingerprint=50,
+        messages_per_fingerprint=100,
         
-        # 3. Overlap
-        window_step_size=25,
+        # 3. Time-Based Batching (Replaces window_step_size)
+        session_timeout_seconds=1800, # 30 minutes
         
         # 4. Storage/Diversity
         max_fingerprints_per_user=40,
