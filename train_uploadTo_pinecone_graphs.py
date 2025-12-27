@@ -53,11 +53,11 @@ def get_config():
         min_messages=100, 
         
         # 2. Stability
-        messages_per_fingerprint=100,
+        messages_per_fingerprint=100, # Reduced from 100 to capture shorter sessions
         
         # 3. Time-Based Clustering (DBSCAN epsilon)
         # Defines the max gap (in seconds) between messages to be considered part of the same session/cluster
-        session_timeout_seconds=120, # 30 minutes
+        session_timeout_seconds=1800, #seconds
         
         # 4. Storage/Diversity
         max_fingerprints_per_user=40,
