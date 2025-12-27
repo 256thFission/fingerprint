@@ -232,6 +232,8 @@ class FingerprintExtractor:
         labels = clustering.labels_
         unique_labels = np.unique(labels)
         
+        # Collect clusters and sort by time
+        clusters = []
         for label in unique_labels:
             if label == -1:
                 continue
@@ -240,11 +242,32 @@ class FingerprintExtractor:
             mask = labels == label
             cluster_batch = user_messages.iloc[mask]
             
-            # Only process if cluster meets minimum size requirement
-            if len(cluster_batch) >= self.config.messages_per_fingerprint:
-                fingerprint = self.create_fingerprint(cluster_batch)
+            # Store with start time for sorting
+            if not cluster_batch.empty:
+                clusters.append((cluster_batch.iloc[0]['timestamp'], cluster_batch))
+        
+        # Sort clusters by start time
+        clusters.sort(key=lambda x: x[0])
+        
+        # Accumulate small clusters until we reach target size
+        current_batch_dfs = []
+        current_batch_size = 0
+        
+        for _, cluster_batch in clusters:
+            current_batch_dfs.append(cluster_batch)
+            current_batch_size += len(cluster_batch)
+            
+            # If we've accumulated enough messages, create a fingerprint
+            if current_batch_size >= self.config.messages_per_fingerprint:
+                combined_batch = pd.concat(current_batch_dfs)
+                
+                fingerprint = self.create_fingerprint(combined_batch)
                 if fingerprint is not None:
                     fingerprints.append(fingerprint)
+                
+                # Reset batch
+                current_batch_dfs = []
+                current_batch_size = 0
             
             if (self.config.max_fingerprints_per_user and 
                 len(fingerprints) >= self.config.max_fingerprints_per_user):
