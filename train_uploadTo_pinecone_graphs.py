@@ -259,6 +259,100 @@ def plot_results(df, train_y, val_y, test_y, test_X, system, val_X, output_dir="
         logger.error(f"Failed to plot PCA: {e}")
 
 
+def sweep_min_messages(df, system, output_dir="plots"):
+    """Sweep min_messages and plot effect on accuracy and user count"""
+    logger.info("Starting min_messages sweep...")
+    
+    # Define range to sweep
+    thresholds = [10, 20, 30, 40, 50, 75, 100, 200, 500, 1000]
+    
+    results = []
+    
+    # Store original config to restore later
+    original_min_messages = system.config.min_messages
+    
+    for min_msg in thresholds:
+        logger.info(f"Testing min_messages={min_msg}...")
+        
+        # Update config
+        system.config.min_messages = min_msg
+        
+        try:
+            # Prepare dataset with new threshold
+            train_X, train_y, val_X, val_y, test_X, test_y = system.prepare_dataset(df)
+            
+            # Check if we have enough data
+            unique_users = np.unique(np.concatenate([train_y, val_y, test_y]))
+            n_users = len(unique_users)
+            
+            if n_users < 2:
+                logger.warning(f"Not enough users ({n_users}) for min_messages={min_msg}. Skipping.")
+                continue
+                
+            # Train
+            system.train_cosine_similarity(train_X, train_y, val_X, val_y)
+            
+            # Evaluate
+            metrics = system.evaluate(test_X, test_y, method='cosine')
+            
+            results.append({
+                'min_messages': min_msg,
+                'num_users': n_users,
+                'top_1_acc': metrics.get('top_1_accuracy', 0),
+                'top_5_acc': metrics.get('top_5_accuracy', 0)
+            })
+            
+            logger.info(f"  Users: {n_users}, Top-1: {metrics.get('top_1_accuracy', 0):.2%}, Top-5: {metrics.get('top_5_accuracy', 0):.2%}")
+            
+        except ValueError as e:
+            logger.warning(f"Skipping min_messages={min_msg}: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"Error at min_messages={min_msg}: {e}")
+            continue
+            
+    # Restore config
+    system.config.min_messages = original_min_messages
+            
+    # Plotting
+    if not results:
+        logger.error("No results to plot.")
+        return
+
+    res_df = pd.DataFrame(results)
+    
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+    
+    color = 'tab:red'
+    ax1.set_xlabel('Minimum Messages per User')
+    ax1.set_ylabel('Accuracy', color=color)
+    ax1.plot(res_df['min_messages'], res_df['top_1_acc'], marker='o', linestyle='-', label='Top-1 Accuracy', color=color)
+    ax1.plot(res_df['min_messages'], res_df['top_5_acc'], marker='s', linestyle='--', label='Top-5 Accuracy', color='tab:orange')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylim(0, 1.05)
+    ax1.grid(True, alpha=0.3)
+    
+    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+    
+    color = 'tab:blue'
+    ax2.set_ylabel('Number of Users', color=color)
+    ax2.plot(res_df['min_messages'], res_df['num_users'], marker='^', linestyle=':', label='User Count', color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+    
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+    
+    plt.title("Effect of Minimum Message Threshold on Accuracy vs User Retention")
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/min_messages_sweep.png")
+    plt.close()
+    
+    logger.info(f"Sweep complete. Plot saved to {output_dir}/min_messages_sweep.png")
+    res_df.to_csv(f"{output_dir}/sweep_results.csv", index=False)
+
+
 def train():
     """Train model"""
     start_time = time.time()
@@ -312,7 +406,18 @@ def train():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == 'siamese':
+    if len(sys.argv) > 1 and sys.argv[1] == 'sweep':
+        start_time = time.time()
+        config = get_config()
+        system = FingerprintingSystem(config)
+        
+        logger.info("Loading data for sweep...")
+        df = system.load_data_safe(max_records=500000)
+        df = preprocess_data(df)
+        
+        sweep_min_messages(df, system)
+        
+    elif len(sys.argv) > 1 and sys.argv[1] == 'siamese':
         start_time = time.time()
         config = get_config()
         config.use_siamese = True
